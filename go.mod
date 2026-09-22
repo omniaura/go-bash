@@ -1,4 +1,4 @@
-module github.com/ditto-assistant/go-bash
+module github.com/omniaura/go-bash
 
 go 1.26.0
 
