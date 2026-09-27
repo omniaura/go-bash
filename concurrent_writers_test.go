@@ -69,10 +69,11 @@ func TestIssue24SortRejectsZeroFieldInPipeline(t *testing.T) {
 // A background job may still be running when RunIO returns. It must not write
 // into the caller's writers after that point, because the caller owns them
 // again. gobash_test_late_write ignores cancellation and writes 20ms after it
-// starts, long after RunIO has returned.
+// starts; the foreground waits only until it has started, so RunIO returns
+// while it is still running.
 func TestNoWritesAfterRunIOReturns(t *testing.T) {
 	out := &countingWriter{}
-	if _, err := New().RunIO(context.Background(), `gobash_test_late_write &`, strings.NewReader(""), out, out); err != nil {
+	if _, err := New().RunIO(context.Background(), `gobash_test_late_write & gobash_test_await_late_write`, strings.NewReader(""), out, out); err != nil {
 		t.Fatalf("interpreter error: %v", err)
 	}
 	atReturn := out.count()
@@ -83,7 +84,7 @@ func TestNoWritesAfterRunIOReturns(t *testing.T) {
 
 	// The same shape with an unsynchronised writer is a data race under -race.
 	var stdout, stderr bytes.Buffer
-	if _, err := New().RunIO(context.Background(), `gobash_test_late_write & gobash_test_late_write >&2 &`, strings.NewReader(""), &stdout, &stderr); err != nil {
+	if _, err := New().RunIO(context.Background(), `gobash_test_late_write & gobash_test_late_write >&2 & gobash_test_await_late_write; gobash_test_await_late_write`, strings.NewReader(""), &stdout, &stderr); err != nil {
 		t.Fatalf("interpreter error: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -111,11 +112,18 @@ func (w *countingWriter) count() int {
 func init() {
 	registerInternal("gobash_test_panic", func(context.Context, *Env) int { panic("boom") })
 	registerInternal("gobash_test_late_write", func(_ context.Context, e *Env) int {
+		lateWriteStarted <- struct{}{}
 		time.Sleep(20 * time.Millisecond)
 		_, _ = fmt.Fprintln(e.Stdout, "late")
 		return 0
 	})
+	registerInternal("gobash_test_await_late_write", func(context.Context, *Env) int {
+		<-lateWriteStarted
+		return 0
+	})
 }
+
+var lateWriteStarted = make(chan struct{}, 8)
 
 // A command that panics in a non-final pipeline stage runs on a goroutine
 // without a recover of its own; it must not take the embedding process down.
