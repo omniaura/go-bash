@@ -8,6 +8,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/afero"
@@ -216,6 +217,47 @@ func (b *captureBuffer) Write(p []byte) (int, error) {
 
 func (b *captureBuffer) WriteString(s string) (int, error) { return b.Write([]byte(s)) }
 
+// errOutputClosed is returned to a background job that writes after its run
+// has finished.
+var errOutputClosed = errors.New("gobash: run finished; output is closed")
+
+// outputGate serialises every write a single run makes to its stdout and
+// stderr. One mutex covers both streams because callers may pass the same
+// writer for each. After close, writes fail instead of reaching the caller.
+type outputGate struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (g *outputGate) wrap(w io.Writer) io.Writer {
+	if w == nil {
+		return nil
+	}
+	return &gatedWriter{gate: g, w: w}
+}
+
+// close waits for any in-flight write and rejects later ones. Taking the
+// mutex also orders every accepted write before the caller's next read.
+func (g *outputGate) close() {
+	g.mu.Lock()
+	g.closed = true
+	g.mu.Unlock()
+}
+
+type gatedWriter struct {
+	gate *outputGate
+	w    io.Writer
+}
+
+func (w *gatedWriter) Write(p []byte) (int, error) {
+	w.gate.mu.Lock()
+	defer w.gate.mu.Unlock()
+	if w.gate.closed {
+		return 0, errOutputClosed
+	}
+	return w.w.Write(p)
+}
+
 // RunIO executes script with explicit stdin/stdout/stderr streams and returns
 // the exit code. The error is non-nil only for parse/interpreter failures.
 func (s *Shell) RunIO(ctx context.Context, script string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int, runErr error) {
@@ -257,8 +299,14 @@ func (s *Shell) RunIO(ctx context.Context, script string, stdin io.Reader, stdou
 		return 2, fmt.Errorf("gobash: parse command prelude: %w", err)
 	}
 	file.Stmts = append(prelude.Stmts, file.Stmts...)
+	// Pipeline stages and background jobs run on their own goroutines and all
+	// share these writers, so every write is serialised. The gate also stops a
+	// still-running background job from writing after RunIO has returned and
+	// the caller owns the writers again.
+	output := &outputGate{}
+	defer output.close()
 	runner, err := interp.New(
-		interp.StdIO(stdin, stdout, stderr),
+		interp.StdIO(stdin, output.wrap(stdout), output.wrap(stderr)),
 		// interp.Dir validates against the host filesystem. Bootstrap from a
 		// host directory and then point the runner at the virtual cwd.
 		interp.Dir("/"),
@@ -274,6 +322,8 @@ func (s *Shell) RunIO(ctx context.Context, script string, stdin io.Reader, stdou
 	}
 	runner.Dir = s.cwd
 	runErr = runner.Run(ctx, file)
+	// Close before the diagnostics below write to stderr directly.
+	output.close()
 	if arithmeticErr := state.firstArithmeticError(); arithmeticErr != nil {
 		_, _ = fmt.Fprintf(stderr, "bash: %v\n", arithmeticErr)
 		return 1, nil

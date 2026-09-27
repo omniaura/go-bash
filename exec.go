@@ -72,12 +72,26 @@ func (s *Shell) execMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 			return next(ctx, args)
 		}
 		hc := interp.HandlerCtx(ctx)
-		code := s.runCommand(ctx, args, hc)
+		code := s.runCommandRecovered(ctx, args, hc)
 		if code == 0 {
 			return nil
 		}
 		return interp.ExitStatus(uint8(code))
 	}
+}
+
+// runCommandRecovered contains a panicking command. Pipeline stages other
+// than the last run on goroutines that mvdan/sh starts without a recover, so
+// a panic there would otherwise terminate the embedding process rather than
+// reach the recover in RunIO.
+func (s *Shell) runCommandRecovered(ctx context.Context, args []string, hc interp.HandlerContext) (code int) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			_, _ = fmt.Fprintf(hc.Stderr, "%s: internal error: %v\n", args[0], recovered)
+			code = 2
+		}
+	}()
+	return s.runCommand(ctx, args, hc)
 }
 
 func (s *Shell) runCommand(ctx context.Context, args []string, hc interp.HandlerContext) int {

@@ -75,3 +75,22 @@ func TestNoWritesAfterRunIOReturns(t *testing.T) {
 		_, _ = stdout.Len(), stderr.Len()
 	}
 }
+
+func init() {
+	registerInternal("gobash_test_panic", func(context.Context, *Env) int { panic("boom") })
+}
+
+// A command that panics in a non-final pipeline stage runs on a goroutine
+// without a recover of its own; it must not take the embedding process down.
+func TestPanickingPipelineStageIsContained(t *testing.T) {
+	for _, script := range []string{
+		`gobash_test_panic | cat`,
+		`echo hi | gobash_test_panic`,
+		`gobash_test_panic & wait`,
+	} {
+		result := run(t, New(), script)
+		if !strings.Contains(result.Stderr, "gobash_test_panic: internal error: boom") {
+			t.Fatalf("%s: got %+v", script, result)
+		}
+	}
+}
