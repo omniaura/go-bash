@@ -68,7 +68,7 @@ func TestIssue24SortRejectsZeroFieldInPipeline(t *testing.T) {
 func TestNoWritesAfterRunIOReturns(t *testing.T) {
 	for range 20 {
 		var stdout, stderr bytes.Buffer
-		if _, err := New().RunIO(context.Background(), `seq 1 100000 & seq 1 100000 >&2 &`, strings.NewReader(""), &stdout, &stderr); err != nil {
+		if _, err := New().RunIO(context.Background(), `while :; do echo out; echo err >&2; done &`, strings.NewReader(""), &stdout, &stderr); err != nil {
 			t.Fatalf("interpreter error: %v", err)
 		}
 		// Reading the buffers races with any late write under -race.
