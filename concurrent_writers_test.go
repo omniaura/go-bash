@@ -94,3 +94,22 @@ func TestPanickingPipelineStageIsContained(t *testing.T) {
 		}
 	}
 }
+
+// A writer whose pipeline reader has exited behaves as if killed by SIGPIPE:
+// no "broken pipe" diagnostic, and status 141 under pipefail.
+func TestBrokenPipeWriterIsSilent(t *testing.T) {
+	for range 20 {
+		result := run(t, New(), `seq 1 200000 | head -n 1`)
+		if result.Stdout != "1\n" || result.Stderr != "" || result.ExitCode != 0 {
+			t.Fatalf("got %+v", result)
+		}
+		result = run(t, New(), `printf 'a\n' | sort -k0`)
+		if result.Stderr != "sort: field number is zero: invalid field specification '0'\n" || result.ExitCode != 2 {
+			t.Fatalf("got %+v", result)
+		}
+	}
+	result := run(t, New(), `set -o pipefail; seq 1 200000 | { read -r line; echo "$line"; }; echo "status=$?"`)
+	if result.Stdout != "1\nstatus=141\n" || result.Stderr != "" {
+		t.Fatalf("got %+v", result)
+	}
+}
