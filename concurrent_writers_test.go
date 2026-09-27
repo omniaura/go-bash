@@ -3,8 +3,11 @@ package gobash
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // mvdan/sh runs every pipeline stage except the last, and every background
@@ -64,20 +67,54 @@ func TestIssue24SortRejectsZeroFieldInPipeline(t *testing.T) {
 }
 
 // A background job may still be running when RunIO returns. It must not write
-// into the caller's writer after that point, because the caller now owns it.
+// into the caller's writers after that point, because the caller owns them
+// again. gobash_test_late_write ignores cancellation and writes 20ms after it
+// starts, long after RunIO has returned.
 func TestNoWritesAfterRunIOReturns(t *testing.T) {
-	for range 20 {
-		var stdout, stderr bytes.Buffer
-		if _, err := New().RunIO(context.Background(), `while :; do echo out; echo err >&2; done &`, strings.NewReader(""), &stdout, &stderr); err != nil {
-			t.Fatalf("interpreter error: %v", err)
-		}
-		// Reading the buffers races with any late write under -race.
-		_, _ = stdout.Len(), stderr.Len()
+	out := &countingWriter{}
+	if _, err := New().RunIO(context.Background(), `gobash_test_late_write &`, strings.NewReader(""), out, out); err != nil {
+		t.Fatalf("interpreter error: %v", err)
 	}
+	atReturn := out.count()
+	time.Sleep(100 * time.Millisecond)
+	if after := out.count(); after != atReturn {
+		t.Fatalf("background job wrote %d times after RunIO returned", after-atReturn)
+	}
+
+	// The same shape with an unsynchronised writer is a data race under -race.
+	var stdout, stderr bytes.Buffer
+	if _, err := New().RunIO(context.Background(), `gobash_test_late_write & gobash_test_late_write >&2 &`, strings.NewReader(""), &stdout, &stderr); err != nil {
+		t.Fatalf("interpreter error: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	_, _ = stdout.Len(), stderr.Len()
+}
+
+type countingWriter struct {
+	mu     sync.Mutex
+	writes int
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writes++
+	return len(p), nil
+}
+
+func (w *countingWriter) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writes
 }
 
 func init() {
 	registerInternal("gobash_test_panic", func(context.Context, *Env) int { panic("boom") })
+	registerInternal("gobash_test_late_write", func(_ context.Context, e *Env) int {
+		time.Sleep(20 * time.Millisecond)
+		_, _ = fmt.Fprintln(e.Stdout, "late")
+		return 0
+	})
 }
 
 // A command that panics in a non-final pipeline stage runs on a goroutine
