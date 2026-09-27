@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
@@ -72,12 +74,26 @@ func (s *Shell) execMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFu
 			return next(ctx, args)
 		}
 		hc := interp.HandlerCtx(ctx)
-		code := s.runCommand(ctx, args, hc)
+		code := s.runCommandRecovered(ctx, args, hc)
 		if code == 0 {
 			return nil
 		}
 		return interp.ExitStatus(uint8(code))
 	}
+}
+
+// runCommandRecovered contains a panicking command. Pipeline stages other
+// than the last run on goroutines that mvdan/sh starts without a recover, so
+// a panic there would otherwise terminate the embedding process rather than
+// reach the recover in RunIO.
+func (s *Shell) runCommandRecovered(ctx context.Context, args []string, hc interp.HandlerContext) (code int) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			_, _ = fmt.Fprintf(hc.Stderr, "%s: internal error: %v\n", args[0], recovered)
+			code = 2
+		}
+	}()
+	return s.runCommand(ctx, args, hc)
 }
 
 func (s *Shell) runCommand(ctx context.Context, args []string, hc interp.HandlerContext) int {
@@ -100,12 +116,51 @@ func (s *Shell) runCommand(ctx context.Context, args []string, hc interp.Handler
 	runNestedEnv := func(nestedCtx context.Context, nestedArgs, assignments []string) int {
 		return s.runShellCommand(nestedCtx, nestedArgs, assignments, hc)
 	}
+	stdout := &sigpipeWriter{w: hc.Stdout}
 	env := &Env{
-		Args: args, Stdin: hc.Stdin, Stdout: hc.Stdout, Stderr: hc.Stderr,
+		Args: args, Stdin: hc.Stdin, Stdout: stdout, Stderr: &sigpipeStderr{w: hc.Stderr, stdout: stdout},
 		FS: s.fs, Dir: hc.Dir, Environ: exportedEnvironment(hc.Env),
 		Now: s.now, RunCommand: runNested, RunCommandEnv: runNestedEnv,
 	}
-	return fn(ctx, env)
+	code := fn(ctx, env)
+	if stdout.broken.Load() {
+		return sigpipeExitStatus
+	}
+	return code
+}
+
+// sigpipeExitStatus is bash's status for a process killed by SIGPIPE.
+const sigpipeExitStatus = 128 + 13
+
+// sigpipeWriter emulates SIGPIPE for a command's stdout. When the reader of
+// a pipeline has exited, a real process is killed silently by SIGPIPE on its
+// next write; a Go builtin instead sees EPIPE and would report it on stderr,
+// while the reader may be reporting its own error at the same moment (issue
+// #24: printf 'a\n' | sort -k0). Once stdout is broken, the command's later
+// stderr output is dropped and its status becomes 141.
+type sigpipeWriter struct {
+	w      io.Writer
+	broken atomic.Bool
+}
+
+func (w *sigpipeWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	if err != nil && (errors.Is(err, syscall.EPIPE) || errors.Is(err, io.ErrClosedPipe)) {
+		w.broken.Store(true)
+	}
+	return n, err
+}
+
+type sigpipeStderr struct {
+	w      io.Writer
+	stdout *sigpipeWriter
+}
+
+func (w *sigpipeStderr) Write(p []byte) (int, error) {
+	if w.stdout.broken.Load() {
+		return len(p), nil
+	}
+	return w.w.Write(p)
 }
 
 // runShellCommand safely re-enters the interpreter with one argv vector. The
