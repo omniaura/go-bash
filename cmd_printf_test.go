@@ -8,7 +8,7 @@ import (
 // TestPrintfMatchesGNUBash replays printfGNUCases, recorded from GNU bash's
 // printf builtin. go-bash has no locale: \u and \U always produce UTF-8, so
 // those cases were recorded under C.UTF-8 (under LC_ALL=C bash prints the
-// escape text, such as é, instead). Every other case is locale
+// escape text, such as \u00E9, instead). Every other case is locale
 // independent and was recorded under LC_ALL=C.
 func TestPrintfMatchesGNUBash(t *testing.T) {
 	for _, tc := range printfGNUCases {
