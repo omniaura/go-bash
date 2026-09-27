@@ -86,7 +86,8 @@ their GNU/BSD counterparts. The most common result-inspection forms are:
 | `zip` / `unzip` | recursive, basename-only, or stored ZIP creation with `-r`, `-j`, `-q`, `-0`, and compression levels `-1` through `-9`; extraction/listing/streaming with `-d`, `-l`, `-Z1`, `-p`, `-q`, `-o`, and `-n`; member selection supports exact paths and globs |
 | `xxd` / `od` / `hexdump` | canonical and plain `xxd`, including `-r -p`, byte limits/offsets/columns; `od -An -tx1` with `-N`/`-j`; canonical `hexdump -C` with `-n`/`-s` |
 | `xargs` | `-0`, `-r`, `-n`, and line-preserving `-I`; invoked argv resolves through the same shell-aware dispatcher, so both shell builtins such as `printf` and registered external commands work |
-| `printf` | common Bash formats and escapes including mixed `%q`, `%b`, numeric width/precision, `--`, and shell-local `-v`; explicit `command printf` and `builtin printf` use the same formatter |
+| `printf` | common Bash formats including mixed `%q`, `%b`, numeric width/precision, `--`, and shell-local `-v`; explicit `command printf` and `builtin printf` use the same formatter. Escapes match GNU bash byte for byte: `\NNN` octal in the format, `\0NNN` in `%b`, `\xHH`, and `\uHHHH`/`\UHHHHHHHH` as UTF-8 |
+| `tr` | GNU coreutils byte semantics (C locale): `-c`/`-C`, `-d`, `-s`, `-t` and their long forms; sets with `\NNN` octal and backslash escapes, ranges, `[:class:]`, `[=c=]`, `[c*]` and `[c*n]` |
 
 Use `gobash commands`, `gobash info --json`, and the supported forms above as
 the runtime inventory. Unsupported predicates, options, and formats fail
