@@ -86,7 +86,7 @@ func TestTimeoutIsBoundedAndLeavesVFSUsable(t *testing.T) {
 func TestQuotingAndBinarySafeStreams(t *testing.T) {
 	result := run(t, New(), `set -- 'space value' $'tab\tvalue' '雪' '' $'line1\nline2' '*' '[abc]'
 for arg in "$@"; do printf '<%q>\n' "$arg"; done
-printf '\0\0377A' > /tmp/binary
+printf '\0\377A' > /tmp/binary
 cat /tmp/binary`)
 	wantPrefix := "<space\\ value>\n<$'tab\\tvalue'>\n<雪>\n<''>\n<$'line1\\nline2'>\n<\\*>\n<\\[abc\\]>\n"
 	if result.ExitCode != 0 || result.Stderr != "" || !strings.HasPrefix(result.Stdout, wantPrefix) {

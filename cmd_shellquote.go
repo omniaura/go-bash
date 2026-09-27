@@ -151,7 +151,11 @@ func cmdGobashPrintf(_ context.Context, e *Env) int {
 		e.Errorf("invalid option: %s", args[0])
 		return 2
 	}
-	out, err := renderBashPrintf(args[0], args[1:])
+	out, diagnostics, err := renderBashPrintf(args[0], args[1:])
+	// Bash reports a malformed escape but still prints it and succeeds.
+	for _, diagnostic := range diagnostics {
+		_, _ = fmt.Fprintf(e.Stderr, "printf: %s\n", diagnostic)
+	}
 	if err != nil {
 		e.Errorf("%v", err)
 		return 1
@@ -163,16 +167,21 @@ func cmdGobashPrintf(_ context.Context, e *Env) int {
 	return 0
 }
 
-func renderBashPrintf(format string, args []string) (string, error) {
+// renderBashPrintf formats like bash's printf builtin. Diagnostics are
+// non-fatal messages (such as a \x escape without digits) that bash writes to
+// stderr while still printing the escape text and exiting 0.
+func renderBashPrintf(format string, args []string) (string, []string, error) {
 	var out strings.Builder
+	var diagnostics []string
 	argAt := 0
 	for {
 		consumedAtStart := argAt
 		for i := 0; i < len(format); {
 			if format[i] == '\\' {
-				value, used := decodePrintfEscape(format[i:])
-				out.WriteString(value)
-				i += used
+				esc := decodePrintfEscape(format[i:], false)
+				out.WriteString(esc.value)
+				diagnostics = appendDiagnostic(diagnostics, esc.diagnostic)
+				i += esc.used
 				continue
 			}
 			if format[i] != '%' {
@@ -200,7 +209,7 @@ func renderBashPrintf(format string, args []string) (string, error) {
 				}
 			}
 			if i >= len(format) {
-				return "", fmt.Errorf("missing format character")
+				return "", diagnostics, fmt.Errorf("missing format character")
 			}
 			verb := format[i]
 			i++
@@ -216,10 +225,11 @@ func renderBashPrintf(format string, args []string) (string, error) {
 			case 'q':
 				_, _ = fmt.Fprintf(&out, directive[:len(directive)-1]+"s", bashQuoted(value))
 			case 'b':
-				decoded, stop := decodePrintfBytes(value)
+				decoded, stop, argDiagnostics := decodePrintfBytes(value)
+				diagnostics = append(diagnostics, argDiagnostics...)
 				_, _ = fmt.Fprintf(&out, directive[:len(directive)-1]+"s", decoded)
 				if stop {
-					return out.String(), nil
+					return out.String(), diagnostics, nil
 				}
 			case 'c':
 				r := rune(0)
@@ -230,7 +240,7 @@ func renderBashPrintf(format string, args []string) (string, error) {
 			case 'd', 'i', 'o', 'x', 'X', 'u':
 				n, err := parsePrintfInteger(value)
 				if err != nil {
-					return "", err
+					return "", diagnostics, err
 				}
 				goDirective := directive
 				if verb == 'i' {
@@ -244,18 +254,25 @@ func renderBashPrintf(format string, args []string) (string, error) {
 			case 'f', 'F', 'e', 'E', 'g', 'G':
 				n, err := strconv.ParseFloat(zeroIfEmpty(value), 64)
 				if err != nil {
-					return "", fmt.Errorf("%s: invalid number", value)
+					return "", diagnostics, fmt.Errorf("%s: invalid number", value)
 				}
 				_, _ = fmt.Fprintf(&out, directive, n)
 			default:
-				return "", fmt.Errorf("unsupported format character: %%%c", verb)
+				return "", diagnostics, fmt.Errorf("unsupported format character: %%%c", verb)
 			}
 		}
 		if argAt >= len(args) || argAt == consumedAtStart {
 			break
 		}
 	}
-	return out.String(), nil
+	return out.String(), diagnostics, nil
+}
+
+func appendDiagnostic(diagnostics []string, diagnostic string) []string {
+	if diagnostic == "" {
+		return diagnostics
+	}
+	return append(diagnostics, diagnostic)
 }
 
 func zeroIfEmpty(value string) string {
@@ -286,81 +303,160 @@ func parsePrintfInteger(value string) (int64, error) {
 	return n, nil
 }
 
-func decodePrintfBytes(value string) (string, bool) {
+// decodePrintfBytes expands a %b argument. The second result reports a \c
+// escape, which stops all further printf output.
+func decodePrintfBytes(value string) (string, bool, []string) {
 	var out strings.Builder
+	var diagnostics []string
 	for i := 0; i < len(value); {
-		if value[i] == '\\' && i+1 < len(value) && value[i+1] == 'c' {
-			return out.String(), true
+		if value[i] != '\\' {
+			out.WriteByte(value[i])
+			i++
+			continue
 		}
-		decoded, used := decodePrintfEscape(value[i:])
-		out.WriteString(decoded)
-		i += used
+		esc := decodePrintfEscape(value[i:], true)
+		if esc.stop {
+			return out.String(), true, diagnostics
+		}
+		out.WriteString(esc.value)
+		diagnostics = appendDiagnostic(diagnostics, esc.diagnostic)
+		i += esc.used
 	}
-	return out.String(), false
+	return out.String(), false, diagnostics
 }
 
-func decodePrintfEscape(value string) (string, int) {
-	if len(value) < 2 || value[0] != '\\' {
-		return value[:1], 1
+// printfEscape is one decoded backslash escape.
+type printfEscape struct {
+	value      string // bytes to emit
+	used       int    // bytes of input consumed, including the backslash
+	stop       bool   // %b's \c: stop all output
+	diagnostic string // non-fatal message bash prints to stderr
+}
+
+// decodePrintfEscape decodes the escape at the start of value (value[0] is a
+// backslash) with the rules of bash's printf builtin (tescape in printf.def).
+// inArg selects %b argument rules: \0 is followed by up to three more octal
+// digits, \c stops output, and \' \" \? are not escapes.
+//
+// Octal (\NNN) and hex (\xHH) escapes produce one raw byte, keeping only the
+// low eight bits. \uHHHH and \UHHHHHHHH produce UTF-8, as bash does in a UTF-8
+// locale. An escape bash does not recognise produces a lone backslash and
+// consumes only that backslash, so the next character is read normally.
+func decodePrintfEscape(value string, inArg bool) printfEscape {
+	literal := printfEscape{value: `\`, used: 1}
+	if len(value) < 2 {
+		return literal
 	}
-	switch value[1] {
+	c := value[1]
+	switch c {
 	case 'a':
-		return "\a", 2
+		return printfEscape{value: "\a", used: 2}
 	case 'b':
-		return "\b", 2
+		return printfEscape{value: "\b", used: 2}
 	case 'e', 'E':
-		return "\x1b", 2
+		return printfEscape{value: "\x1b", used: 2}
 	case 'f':
-		return "\f", 2
+		return printfEscape{value: "\f", used: 2}
 	case 'n':
-		return "\n", 2
+		return printfEscape{value: "\n", used: 2}
 	case 'r':
-		return "\r", 2
+		return printfEscape{value: "\r", used: 2}
 	case 't':
-		return "\t", 2
+		return printfEscape{value: "\t", used: 2}
 	case 'v':
-		return "\v", 2
+		return printfEscape{value: "\v", used: 2}
 	case '\\':
-		return "\\", 2
-	case '\'', '"':
-		return string(value[1]), 2
-	case 'x':
-		return decodePrintfDigits(value, 2, 2, 16)
-	case 'u':
-		return decodePrintfDigits(value, 2, 4, 16)
-	case 'U':
-		return decodePrintfDigits(value, 2, 8, 16)
-	case '0':
-		decoded, used := decodePrintfDigits(value, 2, 3, 8)
-		if used == 2 && decoded == value[:2] {
-			return "\x00", 2
+		return printfEscape{value: `\`, used: 2}
+	case '\'', '"', '?':
+		if inArg {
+			return literal
 		}
-		return decoded, used
+		return printfEscape{value: string(c), used: 2}
+	case 'c':
+		if inArg {
+			return printfEscape{used: 2, stop: true}
+		}
+		return literal
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		n := uint(c - '0')
+		more := 2
+		if n == 0 && inArg {
+			more = 3
+		}
+		end := 2
+		for end < len(value) && more > 0 && value[end] >= '0' && value[end] <= '7' {
+			n = n*8 + uint(value[end]-'0')
+			end++
+			more--
+		}
+		return printfEscape{value: string([]byte{byte(n)}), used: end}
+	case 'x':
+		n, end := printfHexDigits(value, 2)
+		if end == 2 {
+			literal.diagnostic = `missing hex digit for \x`
+			return literal
+		}
+		return printfEscape{value: string([]byte{byte(n)}), used: end}
+	case 'u', 'U':
+		maxDigits := 4
+		if c == 'U' {
+			maxDigits = 8
+		}
+		n, end := printfHexDigits(value, maxDigits)
+		if end == 2 {
+			literal.diagnostic = `missing unicode digit for \` + string(c)
+			return literal
+		}
+		return printfEscape{value: bashUTF8(n), used: end}
 	default:
-		return value[:2], 2
+		return literal
 	}
 }
 
-func decodePrintfDigits(value string, start, maxDigits, base int) (string, int) {
-	end := start
-	for end < len(value) && end-start < maxDigits {
+// printfHexDigits reads up to maxDigits hex digits starting at value[2].
+func printfHexDigits(value string, maxDigits int) (uint64, int) {
+	var n uint64
+	end := 2
+	for end < len(value) && end-2 < maxDigits {
 		c := value[end]
-		valid := c >= '0' && c <= '9' || base == 16 && (c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F')
-		if !valid || base == 8 && c > '7' {
-			break
+		var digit byte
+		switch {
+		case c >= '0' && c <= '9':
+			digit = c - '0'
+		case c >= 'a' && c <= 'f':
+			digit = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			digit = c - 'A' + 10
+		default:
+			return n, end
 		}
+		n = n*16 + uint64(digit)
 		end++
 	}
-	if end == start {
-		return value[:min(len(value), start)], min(len(value), start)
+	return n, end
+}
+
+// bashUTF8 encodes a \u or \U value the way bash does in a UTF-8 locale
+// (u32toutf8): values up to 0x7f are one byte, surrogates are encoded rather
+// than rejected, values above U+10FFFF use the original five- and six-byte
+// UTF-8 forms, and values from 0x80000000 produce nothing.
+func bashUTF8(n uint64) string {
+	switch {
+	case n < 0x80:
+		return string([]byte{byte(n)})
+	case n < 0x800:
+		return string([]byte{0xc0 | byte(n>>6), 0x80 | byte(n&0x3f)})
+	case n < 0x10000:
+		return string([]byte{0xe0 | byte(n>>12), 0x80 | byte(n>>6&0x3f), 0x80 | byte(n&0x3f)})
+	case n < 0x200000:
+		return string([]byte{0xf0 | byte(n>>18), 0x80 | byte(n>>12&0x3f), 0x80 | byte(n>>6&0x3f), 0x80 | byte(n&0x3f)})
+	case n < 0x4000000:
+		return string([]byte{0xf8 | byte(n>>24), 0x80 | byte(n>>18&0x3f), 0x80 | byte(n>>12&0x3f), 0x80 | byte(n>>6&0x3f), 0x80 | byte(n&0x3f)})
+	case n < 0x80000000:
+		return string([]byte{0xfc | byte(n>>30), 0x80 | byte(n>>24&0x3f), 0x80 | byte(n>>18&0x3f), 0x80 | byte(n>>12&0x3f), 0x80 | byte(n>>6&0x3f), 0x80 | byte(n&0x3f)})
+	default:
+		return ""
 	}
-	n, _ := strconv.ParseUint(value[start:end], base, 32)
-	if value[1] == 'u' || value[1] == 'U' {
-		return string(rune(n)), end
-	}
-	// Octal and \x escapes are byte escapes in Bash printf, including values
-	// that are not valid standalone UTF-8. Preserve those bytes exactly.
-	return string([]byte{byte(n)}), end
 }
 
 func utf8FirstRune(value string) (rune, int) {
