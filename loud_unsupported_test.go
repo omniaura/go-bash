@@ -19,6 +19,8 @@ func TestSilentlyUnsupportedConstructsAreRefused(t *testing.T) {
 		`read -t 1 x <<< hi; echo ran`:                    "read -t is unavailable",
 		`set -eE; echo ran`:                               "set -E is unavailable",
 		`shopt -q nullglob && echo on; echo ran`:          "shopt -q is unavailable",
+		`command read -d , x <<< "a,b"; echo ran`:         "read -d is unavailable",
+		`builtin set -E; echo ran`:                        "set -E is unavailable",
 		`shopt -p; echo ran`:                              "shopt -p is unavailable",
 		`f() { read -N 3 x; }; echo before; f; echo ran`:  "read -N is unavailable",
 	} {
@@ -42,6 +44,7 @@ func TestSupportedFormsOfRefusedBuiltinsStillRun(t *testing.T) {
 		`shopt -s nullglob; echo ok`:                     "ok\n",
 		`echo "-d -n -E -q are only words here"`:         "-d -n -E -q are only words here\n",
 		`printf '%s\n' read -d`:                          "read\n-d\n",
+		`command -v read >/dev/null && echo ok`:          "ok\n",
 		`echo PIPESTATUS`:                                "PIPESTATUS\n",
 	} {
 		result, err := New().Run(context.Background(), script)

@@ -14,11 +14,19 @@ import (
 // literal words are inspected; a flag built at run time still reaches the
 // interpreter's own error.
 func unsupportedBuiltinFlag(call *syntax.CallExpr) string {
-	if len(call.Args) < 2 {
+	args := call.Args
+	// "command read -d" and "builtin read -d" run the same builtin.
+	for len(args) > 0 && (args[0].Lit() == "command" || args[0].Lit() == "builtin") {
+		args = args[1:]
+		for len(args) > 0 && args[0].Lit() == "-p" {
+			args = args[1:]
+		}
+	}
+	if len(args) < 2 {
 		return ""
 	}
-	name := call.Args[0].Lit()
-	for _, arg := range call.Args[1:] {
+	name := args[0].Lit()
+	for _, arg := range args[1:] {
 		flag := arg.Lit()
 		if !strings.HasPrefix(flag, "-") || flag == "-" || flag == "--" {
 			if flag == "--" {
