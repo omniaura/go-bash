@@ -25,10 +25,10 @@ const (
 func BashLimitations() []string {
 	return []string{
 		"no process substitution; use pipelines or VFS temporary files",
-		"no PIPESTATUS; use set -o pipefail and check the pipeline status",
-		"read -d/-n/-N/-t are unavailable; use xargs -0, jq, or outer JavaScript",
+		"no PIPESTATUS (a script reading it is refused); use set -o pipefail and check $?",
+		"read -d/-n/-N/-t are refused before the script runs; use xargs -0, jq, or outer JavaScript",
 		"some associative-array key syntax differs; quote complex keys or use jq/outer JavaScript",
 		"BASH_SOURCE, BASH_LINENO, and FUNCNAME are unavailable",
-		"set -E, shopt -p/-q, and declare -i are unavailable",
+		"set -E and shopt -p/-q are refused before the script runs; declare -i is unavailable",
 	}
 }
