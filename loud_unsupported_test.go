@@ -35,13 +35,14 @@ func TestSilentlyUnsupportedConstructsAreRefused(t *testing.T) {
 // The supported forms of the same builtins keep working.
 func TestSupportedFormsOfRefusedBuiltinsStillRun(t *testing.T) {
 	for script, want := range map[string]string{
-		`read -r x <<< hello; echo "$x"`:              "hello\n",
-		`set -o pipefail; false | true; echo "rc=$?"`: "rc=1\n",
-		`set -eu; echo ok`:                            "ok\n",
-		`shopt -s nullglob; echo ok`:                  "ok\n",
-		`echo "-d -n -E -q are only words here"`:      "-d -n -E -q are only words here\n",
-		`printf '%s\n' read -d`:                       "read\n-d\n",
-		`echo PIPESTATUS`:                             "PIPESTATUS\n",
+		`read -r x <<< hello; echo "$x"`:                 "hello\n",
+		`read -r name date <<< "a b"; echo "$name$date"`: "ab\n",
+		`set -o pipefail; false | true; echo "rc=$?"`:    "rc=1\n",
+		`set -eu; echo ok`:                               "ok\n",
+		`shopt -s nullglob; echo ok`:                     "ok\n",
+		`echo "-d -n -E -q are only words here"`:         "-d -n -E -q are only words here\n",
+		`printf '%s\n' read -d`:                          "read\n-d\n",
+		`echo PIPESTATUS`:                                "PIPESTATUS\n",
 	} {
 		result, err := New().Run(context.Background(), script)
 		if err != nil || result.Stdout != want {
