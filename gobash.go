@@ -283,16 +283,36 @@ func (s *Shell) RunIO(ctx context.Context, script string, stdin io.Reader, stdou
 	rewriteTypeAll(file)
 	rewriteArrayLengths(file)
 	guardInvalidOctalArithmetic(file)
-	var processSubstitution bool
+	var processSubstitution, pipeStatus bool
+	var unsupported string
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if _, ok := node.(*syntax.ProcSubst); ok {
+		switch node := node.(type) {
+		case *syntax.CallExpr:
+			if unsupported == "" {
+				unsupported = unsupportedBuiltinFlag(node)
+			}
+		case *syntax.ProcSubst:
 			processSubstitution = true
 			return false
+		case *syntax.ParamExp:
+			// The interpreter does not track PIPESTATUS, so it expands to
+			// nothing with exit 0: a check that reads it passes having read
+			// nothing. Refuse the script instead, the way process
+			// substitution is refused.
+			if node.Param != nil && node.Param.Value == "PIPESTATUS" {
+				pipeStatus = true
+			}
 		}
 		return true
 	})
 	if processSubstitution {
 		return 2, fmt.Errorf("bash: process substitution is unavailable in the virtual filesystem; use a pipeline or temporary VFS file")
+	}
+	if pipeStatus {
+		return 2, fmt.Errorf("bash: PIPESTATUS is unavailable; use set -o pipefail and check $? (the pipeline's exit status)")
+	}
+	if unsupported != "" {
+		return 2, fmt.Errorf("bash: %s", unsupported)
 	}
 	prelude, err := syntax.NewParser().Parse(strings.NewReader(commandPrelude()), "gobash-prelude")
 	if err != nil {
